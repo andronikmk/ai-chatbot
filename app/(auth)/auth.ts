@@ -38,6 +38,9 @@ export const {
   signOut,
 } = NextAuth({
   ...authConfig,
+  // If in mock mode (no DB), we allow a dummy secret if AUTH_SECRET is not set.
+  // This is insecure for production but acceptable for local "mock" exploration.
+  secret: process.env.AUTH_SECRET || (!process.env.POSTGRES_URL ? "mock-secret-for-local-dev" : undefined),
   providers: [
     Credentials({
       credentials: {},
