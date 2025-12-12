@@ -31,6 +31,8 @@ import {
   type User,
   user,
   vote,
+  type Vote,
+  type Document,
 } from "./schema";
 import { generateHashedPassword } from "./utils";
 
@@ -38,11 +40,33 @@ import { generateHashedPassword } from "./utils";
 // use the Drizzle adapter for Auth.js / NextAuth
 // https://authjs.dev/reference/adapter/drizzle
 
-// biome-ignore lint: Forbidden non-null assertion.
-const client = postgres(process.env.POSTGRES_URL!);
-const db = drizzle(client);
+const IS_MOCK_MODE = !process.env.POSTGRES_URL;
+
+let client;
+let db: any;
+
+if (!IS_MOCK_MODE) {
+  // biome-ignore lint: Forbidden non-null assertion.
+  client = postgres(process.env.POSTGRES_URL!);
+  db = drizzle(client);
+}
+
+// Mock Data Store
+const mockStore = {
+  users: [] as User[],
+  chats: [] as Chat[],
+  messages: [] as DBMessage[],
+  votes: [] as Vote[],
+  documents: [] as Document[],
+  suggestions: [] as Suggestion[],
+  streams: [] as any[], // Using any to simplify mock type matching
+};
 
 export async function getUser(email: string): Promise<User[]> {
+  if (IS_MOCK_MODE) {
+    return mockStore.users.filter((u) => u.email === email);
+  }
+
   try {
     return await db.select().from(user).where(eq(user.email, email));
   } catch (_error) {
@@ -56,6 +80,16 @@ export async function getUser(email: string): Promise<User[]> {
 export async function createUser(email: string, password: string) {
   const hashedPassword = generateHashedPassword(password);
 
+  if (IS_MOCK_MODE) {
+    const newUser: User = {
+      id: generateUUID(),
+      email,
+      password: hashedPassword,
+    };
+    mockStore.users.push(newUser);
+    return [newUser]; // Return array to match drizzle insert returning behavior
+  }
+
   try {
     return await db.insert(user).values({ email, password: hashedPassword });
   } catch (_error) {
@@ -66,6 +100,16 @@ export async function createUser(email: string, password: string) {
 export async function createGuestUser() {
   const email = `guest-${Date.now()}`;
   const password = generateHashedPassword(generateUUID());
+
+  if (IS_MOCK_MODE) {
+    const newUser: User = {
+      id: generateUUID(),
+      email,
+      password,
+    };
+    mockStore.users.push(newUser);
+    return [{ id: newUser.id, email: newUser.email }];
+  }
 
   try {
     return await db.insert(user).values({ email, password }).returning({
@@ -91,6 +135,24 @@ export async function saveChat({
   title: string;
   visibility: VisibilityType;
 }) {
+  if (IS_MOCK_MODE) {
+    const newChat: Chat = {
+      id,
+      createdAt: new Date(),
+      userId,
+      title,
+      visibility,
+      lastContext: null,
+    };
+    const existingChatIndex = mockStore.chats.findIndex((c) => c.id === id);
+    if (existingChatIndex >= 0) {
+        mockStore.chats[existingChatIndex] = { ...mockStore.chats[existingChatIndex], ...newChat };
+    } else {
+        mockStore.chats.push(newChat);
+    }
+    return [newChat];
+  }
+
   try {
     return await db.insert(chat).values({
       id,
@@ -105,6 +167,15 @@ export async function saveChat({
 }
 
 export async function deleteChatById({ id }: { id: string }) {
+  if (IS_MOCK_MODE) {
+    mockStore.votes = mockStore.votes.filter((v) => v.chatId !== id);
+    mockStore.messages = mockStore.messages.filter((m) => m.chatId !== id);
+    mockStore.streams = mockStore.streams.filter((s) => s.chatId !== id);
+    const chatsDeleted = mockStore.chats.filter((c) => c.id === id);
+    mockStore.chats = mockStore.chats.filter((c) => c.id !== id);
+    return chatsDeleted.length > 0 ? chatsDeleted[0] : undefined;
+  }
+
   try {
     await db.delete(vote).where(eq(vote.chatId, id));
     await db.delete(message).where(eq(message.chatId, id));
@@ -124,6 +195,24 @@ export async function deleteChatById({ id }: { id: string }) {
 }
 
 export async function deleteAllChatsByUserId({ userId }: { userId: string }) {
+  if (IS_MOCK_MODE) {
+    const userChats = mockStore.chats.filter((c) => c.userId === userId);
+    const chatIds = userChats.map((c) => c.id);
+
+    mockStore.votes = mockStore.votes.filter(
+      (v) => !chatIds.includes(v.chatId)
+    );
+    mockStore.messages = mockStore.messages.filter(
+      (m) => !chatIds.includes(m.chatId)
+    );
+    mockStore.streams = mockStore.streams.filter(
+      (s) => !chatIds.includes(s.chatId)
+    );
+    mockStore.chats = mockStore.chats.filter((c) => c.userId !== userId);
+
+    return { deletedCount: userChats.length };
+  }
+
   try {
     const userChats = await db
       .select({ id: chat.id })
@@ -134,7 +223,7 @@ export async function deleteAllChatsByUserId({ userId }: { userId: string }) {
       return { deletedCount: 0 };
     }
 
-    const chatIds = userChats.map((c) => c.id);
+    const chatIds = userChats.map((c: any) => c.id);
 
     await db.delete(vote).where(inArray(vote.chatId, chatIds));
     await db.delete(message).where(inArray(message.chatId, chatIds));
@@ -165,6 +254,34 @@ export async function getChatsByUserId({
   startingAfter: string | null;
   endingBefore: string | null;
 }) {
+  if (IS_MOCK_MODE) {
+    let filteredChats = mockStore.chats
+      .filter((c) => c.userId === id)
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+
+    if (startingAfter) {
+      const selectedChat = mockStore.chats.find((c) => c.id === startingAfter);
+      if (selectedChat) {
+        filteredChats = filteredChats.filter(
+          (c) => c.createdAt.getTime() < selectedChat.createdAt.getTime()
+        );
+      }
+    } else if (endingBefore) {
+      const selectedChat = mockStore.chats.find((c) => c.id === endingBefore);
+      if (selectedChat) {
+        filteredChats = filteredChats.filter(
+          (c) => c.createdAt.getTime() > selectedChat.createdAt.getTime()
+        );
+      }
+    }
+
+    const hasMore = filteredChats.length > limit;
+    return {
+      chats: hasMore ? filteredChats.slice(0, limit) : filteredChats,
+      hasMore,
+    };
+  }
+
   try {
     const extendedLimit = limit + 1;
 
@@ -231,6 +348,10 @@ export async function getChatsByUserId({
 }
 
 export async function getChatById({ id }: { id: string }) {
+  if (IS_MOCK_MODE) {
+    return mockStore.chats.find((c) => c.id === id) || null;
+  }
+
   try {
     const [selectedChat] = await db.select().from(chat).where(eq(chat.id, id));
     if (!selectedChat) {
@@ -244,6 +365,19 @@ export async function getChatById({ id }: { id: string }) {
 }
 
 export async function saveMessages({ messages }: { messages: DBMessage[] }) {
+  if (IS_MOCK_MODE) {
+    for (const msg of messages) {
+       // Check if message exists to update or push
+       const idx = mockStore.messages.findIndex(m => m.id === msg.id);
+       if (idx >= 0) {
+           mockStore.messages[idx] = msg;
+       } else {
+           mockStore.messages.push(msg);
+       }
+    }
+    return messages;
+  }
+
   try {
     return await db.insert(message).values(messages);
   } catch (_error) {
@@ -252,6 +386,12 @@ export async function saveMessages({ messages }: { messages: DBMessage[] }) {
 }
 
 export async function getMessagesByChatId({ id }: { id: string }) {
+  if (IS_MOCK_MODE) {
+    return mockStore.messages
+      .filter((m) => m.chatId === id)
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+  }
+
   try {
     return await db
       .select()
@@ -275,6 +415,19 @@ export async function voteMessage({
   messageId: string;
   type: "up" | "down";
 }) {
+  if (IS_MOCK_MODE) {
+    const existingVoteIndex = mockStore.votes.findIndex(
+      (v) => v.messageId === messageId
+    );
+    if (existingVoteIndex >= 0) {
+      mockStore.votes[existingVoteIndex].isUpvoted = type === "up";
+      return [mockStore.votes[existingVoteIndex]];
+    }
+    const newVote = { chatId, messageId, isUpvoted: type === "up" };
+    mockStore.votes.push(newVote);
+    return [newVote];
+  }
+
   try {
     const [existingVote] = await db
       .select()
@@ -298,6 +451,10 @@ export async function voteMessage({
 }
 
 export async function getVotesByChatId({ id }: { id: string }) {
+  if (IS_MOCK_MODE) {
+    return mockStore.votes.filter((v) => v.chatId === id);
+  }
+
   try {
     return await db.select().from(vote).where(eq(vote.chatId, id));
   } catch (_error) {
@@ -321,6 +478,19 @@ export async function saveDocument({
   content: string;
   userId: string;
 }) {
+  if (IS_MOCK_MODE) {
+    const newDoc: Document = {
+      id,
+      title,
+      kind,
+      content,
+      userId,
+      createdAt: new Date(),
+    };
+    mockStore.documents.push(newDoc);
+    return [newDoc];
+  }
+
   try {
     return await db
       .insert(document)
@@ -339,6 +509,12 @@ export async function saveDocument({
 }
 
 export async function getDocumentsById({ id }: { id: string }) {
+  if (IS_MOCK_MODE) {
+    return mockStore.documents
+      .filter((d) => d.id === id)
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+  }
+
   try {
     const documents = await db
       .select()
@@ -356,6 +532,15 @@ export async function getDocumentsById({ id }: { id: string }) {
 }
 
 export async function getDocumentById({ id }: { id: string }) {
+  if (IS_MOCK_MODE) {
+    return (
+      mockStore.documents
+        .filter((d) => d.id === id)
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0] ||
+      undefined
+    );
+  }
+
   try {
     const [selectedDocument] = await db
       .select()
@@ -379,6 +564,23 @@ export async function deleteDocumentsByIdAfterTimestamp({
   id: string;
   timestamp: Date;
 }) {
+  if (IS_MOCK_MODE) {
+    mockStore.suggestions = mockStore.suggestions.filter(
+      (s) =>
+        !(
+          s.documentId === id &&
+          s.documentCreatedAt.getTime() > timestamp.getTime()
+        )
+    );
+    const deletedDocs = mockStore.documents.filter(
+      (d) => d.id === id && d.createdAt.getTime() > timestamp.getTime()
+    );
+    mockStore.documents = mockStore.documents.filter(
+      (d) => !(d.id === id && d.createdAt.getTime() > timestamp.getTime())
+    );
+    return deletedDocs;
+  }
+
   try {
     await db
       .delete(suggestion)
@@ -406,6 +608,11 @@ export async function saveSuggestions({
 }: {
   suggestions: Suggestion[];
 }) {
+  if (IS_MOCK_MODE) {
+    mockStore.suggestions.push(...suggestions);
+    return suggestions;
+  }
+
   try {
     return await db.insert(suggestion).values(suggestions);
   } catch (_error) {
@@ -421,6 +628,10 @@ export async function getSuggestionsByDocumentId({
 }: {
   documentId: string;
 }) {
+  if (IS_MOCK_MODE) {
+    return mockStore.suggestions.filter((s) => s.documentId === documentId);
+  }
+
   try {
     return await db
       .select()
@@ -435,6 +646,10 @@ export async function getSuggestionsByDocumentId({
 }
 
 export async function getMessageById({ id }: { id: string }) {
+  if (IS_MOCK_MODE) {
+    return mockStore.messages.filter((m) => m.id === id);
+  }
+
   try {
     return await db.select().from(message).where(eq(message.id, id));
   } catch (_error) {
@@ -452,6 +667,23 @@ export async function deleteMessagesByChatIdAfterTimestamp({
   chatId: string;
   timestamp: Date;
 }) {
+  if (IS_MOCK_MODE) {
+    const messagesToDelete = mockStore.messages.filter(
+      (m) => m.chatId === chatId && m.createdAt.getTime() >= timestamp.getTime()
+    );
+    const messageIds = messagesToDelete.map((m) => m.id);
+
+    if (messageIds.length > 0) {
+      mockStore.votes = mockStore.votes.filter(
+        (v) => v.chatId !== chatId || !messageIds.includes(v.messageId)
+      );
+      mockStore.messages = mockStore.messages.filter(
+        (m) => m.chatId !== chatId || !messageIds.includes(m.id)
+      );
+    }
+    return;
+  }
+
   try {
     const messagesToDelete = await db
       .select({ id: message.id })
@@ -461,7 +693,7 @@ export async function deleteMessagesByChatIdAfterTimestamp({
       );
 
     const messageIds = messagesToDelete.map(
-      (currentMessage) => currentMessage.id
+      (currentMessage: any) => currentMessage.id
     );
 
     if (messageIds.length > 0) {
@@ -492,6 +724,15 @@ export async function updateChatVisibilityById({
   chatId: string;
   visibility: "private" | "public";
 }) {
+  if (IS_MOCK_MODE) {
+    const chat = mockStore.chats.find((c) => c.id === chatId);
+    if (chat) {
+      chat.visibility = visibility;
+      return [chat];
+    }
+    return [];
+  }
+
   try {
     return await db.update(chat).set({ visibility }).where(eq(chat.id, chatId));
   } catch (_error) {
@@ -510,6 +751,14 @@ export async function updateChatLastContextById({
   // Store merged server-enriched usage object
   context: AppUsage;
 }) {
+  if (IS_MOCK_MODE) {
+    const chat = mockStore.chats.find((c) => c.id === chatId);
+    if (chat) {
+        chat.lastContext = context;
+    }
+    return;
+  }
+
   try {
     return await db
       .update(chat)
@@ -528,6 +777,16 @@ export async function getMessageCountByUserId({
   id: string;
   differenceInHours: number;
 }) {
+  if (IS_MOCK_MODE) {
+     const twentyFourHoursAgo = new Date(
+      Date.now() - differenceInHours * 60 * 60 * 1000
+    );
+    return mockStore.messages.filter(m => {
+        const chat = mockStore.chats.find(c => c.id === m.chatId);
+        return chat && chat.userId === id && m.createdAt >= twentyFourHoursAgo && m.role === 'user';
+    }).length;
+  }
+
   try {
     const twentyFourHoursAgo = new Date(
       Date.now() - differenceInHours * 60 * 60 * 1000
@@ -562,6 +821,11 @@ export async function createStreamId({
   streamId: string;
   chatId: string;
 }) {
+  if (IS_MOCK_MODE) {
+      mockStore.streams.push({ id: streamId, chatId, createdAt: new Date() });
+      return;
+  }
+
   try {
     await db
       .insert(stream)
@@ -575,6 +839,10 @@ export async function createStreamId({
 }
 
 export async function getStreamIdsByChatId({ chatId }: { chatId: string }) {
+  if (IS_MOCK_MODE) {
+      return mockStore.streams.filter(s => s.chatId === chatId).sort((a,b) => a.createdAt.getTime() - b.createdAt.getTime()).map(s => s.id);
+  }
+
   try {
     const streamIds = await db
       .select({ id: stream.id })
@@ -583,7 +851,7 @@ export async function getStreamIdsByChatId({ chatId }: { chatId: string }) {
       .orderBy(asc(stream.createdAt))
       .execute();
 
-    return streamIds.map(({ id }) => id);
+    return streamIds.map(({ id }: any) => id);
   } catch (_error) {
     throw new ChatSDKError(
       "bad_request:database",
