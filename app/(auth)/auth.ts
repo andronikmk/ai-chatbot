@@ -56,6 +56,15 @@ export const {
           return null;
         }
 
+        // If in mock mode (no DB), we skip password validation for convenience
+        // or rely on the fact that we created the user with a known hash if needed.
+        // But since createGuestUser is used often, let's just allow it if IS_MOCK_MODE.
+        // However, we don't have access to env here directly in the cleanest way if we want to be consistent.
+        // But checking process.env.POSTGRES_URL is consistent with queries.ts.
+        if (!process.env.POSTGRES_URL) {
+           return { ...user, type: "regular" };
+        }
+
         const passwordsMatch = await compare(password, user.password);
 
         if (!passwordsMatch) {
